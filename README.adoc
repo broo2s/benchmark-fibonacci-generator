@@ -1,0 +1,137 @@
+= Fibonacci generator benchmark
+
+== Overview
+
+This project measures how quickly we can switch or "jump" from one execution context (thread, coroutine, etc.) to another specific one in various concurrency frameworks for JVM. It compares platform threads, virtual threads (Java 21) and Kotlin coroutines.
+
+By switching the context we mean to suspend the current thread (coroutine) and immediately resume another one, chosen by the first. We "jump" to another task.
+
+NOTE: Disclaimer: I don't claim to be an expert in benchmarking nor low-level concurrency code. Feel free to suggest improvements or say that the benchmark is entirely wrong or doesn't make sense.
+
+== Benchmark
+
+Test case is to write a https://en.wikipedia.org/wiki/Generator_(computer_programming)[generator] for the fibonacci sequence. There is a single producer, single consumer and no buffers between them. Consumer doesn't do anything with received items, it just consumes them, optionally summing them up for verification purposes.
+
+As the main point of this benchmark is to measure the context switch between two separate execution flows, it is required that both the producer and the consumer run in their own loops. It is not allowed to execute the producer as a subroutine of the consumer or vice versa.
+
+Both the producer and the consumer are very quick. This is intentional to focus on measuring how quickly they could pass items between them. This also means it could be beneficial to actually execute the producer and the consumer sequentially, not in parallel. Provided benchmarks generally favor alternating the execution between both sides, although depending on a case, it is not always technically possible.
+
+We use a classic `Iterator` implementation as a kind of baseline. It doesn't meet the above requirements, but it is potentially the fastest implementation, so we can use it to estimate the cost associated with running both sides independently.
+
+== Results
+
+Benchmark was performed using OpenJDK 21 (21+35-2513) for both compiling and running, Kotlin 1.9.23 and Intel i7-6600U CPU with 4 cores.
+
+....
+Benchmark                     (multiplier)  (threadType)  Mode  Cnt      Score     Error  Units
+BaselineJavaBench.each                   1       VIRTUAL  avgt    5      0.167 ±   0.009  ns/op
+BaselineJavaBench.sum                    1       VIRTUAL  avgt    5      0.322 ±   0.013  ns/op
+BaselineKotlinBench.each                 1           N/A  avgt    5      0.167 ±   0.008  ns/op
+BaselineKotlinBench.eachWithLoop         1           N/A  avgt    5      0.167 ±   0.005  ns/op
+BaselineKotlinBench.sum                  1           N/A  avgt    5      0.320 ±   0.004  ns/op
+BaselineKotlinBench.sumWithLoop          1           N/A  avgt    5      0.320 ±   0.006  ns/op
+LockConditionBench.each                  1      PLATFORM  avgt    5  10913.721 ± 641.787  ns/op
+LockConditionBench.each                  1       VIRTUAL  avgt    5   1187.585 ± 202.616  ns/op
+LockConditionBench.sum                   1      PLATFORM  avgt    5  11042.869 ± 666.831  ns/op
+LockConditionBench.sum                   1       VIRTUAL  avgt    5   1271.853 ± 446.692  ns/op
+ContinuationsBench.each                  1           N/A  avgt    5      7.350 ±   0.394  ns/op
+ContinuationsBench.eachWithLoop          1           N/A  avgt    5      6.371 ±   0.864  ns/op
+ContinuationsBench.sum                   1           N/A  avgt    5      6.519 ±   0.417  ns/op
+ContinuationsBench.sumWithLoop           1           N/A  avgt    5      8.349 ±   0.197  ns/op
+FlowBench.each                           1           N/A  avgt    5     19.531 ±   2.653  ns/op
+FlowBench.sum                            1           N/A  avgt    5     23.224 ±   2.245  ns/op
+IteratorBench.each                       1           N/A  avgt    5      0.310 ±   0.003  ns/op
+IteratorBench.sum                        1           N/A  avgt    5      0.325 ±   0.007  ns/op
+ManualUnparkBench.each                   1      PLATFORM  avgt    5  10118.786 ± 627.443  ns/op
+ManualUnparkBench.each                   1       VIRTUAL  avgt    5   1246.052 ± 133.528  ns/op
+ManualUnparkBench.sum                    1      PLATFORM  avgt    5  10075.767 ± 727.289  ns/op
+ManualUnparkBench.sum                    1       VIRTUAL  avgt    5   1249.094 ± 107.471  ns/op
+SequenceBench.each                       1           N/A  avgt    5      9.144 ±   0.788  ns/op
+SequenceBench.eachWithLoop               1           N/A  avgt    5     10.689 ±   0.793  ns/op
+SequenceBench.sum                        1           N/A  avgt    5      8.921 ±   0.498  ns/op
+SequenceBench.sumWithLoop                1           N/A  avgt    5      9.344 ±   0.311  ns/op
+SpinVolatileBench.each                   1      PLATFORM  avgt    5    133.039 ±  48.724  ns/op
+SpinVolatileBench.each                   1       VIRTUAL  avgt    5    162.338 ±  18.683  ns/op
+SpinVolatileBench.sum                    1      PLATFORM  avgt    5    139.291 ±  31.613  ns/op
+SpinVolatileBench.sum                    1       VIRTUAL  avgt    5    156.103 ±  30.493  ns/op
+SynchronousQueueBench.each               1      PLATFORM  avgt    5   3219.472 ± 453.038  ns/op
+SynchronousQueueBench.each               1       VIRTUAL  avgt    5    385.412 ± 123.152  ns/op
+SynchronousQueueBench.sum                1      PLATFORM  avgt    5   3147.486 ± 568.828  ns/op
+SynchronousQueueBench.sum                1       VIRTUAL  avgt    5    384.051 ±  49.939  ns/op
+....
+
+Key takeaways:
+
+* Iterators (link:src/jmh/java/me/broot/benchmark/fibgen/IteratorBench.java[IteratorBench]) are confirmed to be the fastest.
+* Kotlin coroutines (link:src/jmh/kotlin/me/broot/benchmark/fibgen/ContinuationsBench.kt[ContinuationsBench], link:src/jmh/kotlin/me/broot/benchmark/fibgen/SequenceBench.kt[SequenceBench]) are 20-30 times slower. This is the overhead of suspend functions and the cost of suspending and resuming.
+* Virtual threads with busy-waiting (link:src/jmh/java/me/broot/benchmark/fibgen/SpinVolatileBench.java[SpinVolatileBench], link:src/jmh/java/me/broot/benchmark/fibgen/SynchronousQueueBench.java[SynchronousQueueBench]) are 420-1200 times slower than iterators and ~30 times slower than coroutines.
+* Virtual threads with waiting/resuming (link:src/jmh/java/me/broot/benchmark/fibgen/LockConditionBench.java[LockConditionBench], link:src/jmh/java/me/broot/benchmark/fibgen/ManualUnparkBench.java[ManualUnparkBench]) are ~3900x slower than iterators and ~150 times slower than coroutines.
+* Platform threads are ~8 times slower than virtual threads for most cases.
+
+With additional logs it was confirmed that iterators and coroutines used a single thread underneath. All solutions based on virtual threads jumped between multiple OS threads randomly.
+
+Additionally, the CPU consumption differed. According to the OS system monitor, all benchmarks that are expected to run in a single thread (iterators, coroutines) consumed about 30% of all cores (~1 core). Most virtual threads benchmarks took ~60% (~2 CPU cores). `SynchronousQueueBench` was somehow heavier, consuming ~70% of all cores.
+
+== Background
+
+We focus specifically on the case of "jumping" to another thread/coroutine, because in this case the execution flow is actually sequential, not parallel. If each task is executed in its own OS thread then we don't have other choice, but to perform a context switch which is pretty slow. For this reason, we often prefer a single-threaded asynchronous execution to avoid the context switch. On the other hand, that makes the code more complex.
+
+With newly emerging "lightweight threads" solutions, we can now write two separate tasks using a classic sequential code, and still execute them using a single thread underneath, one task after another, similarly to the asynchronous solution. The question is: how well do different frameworks cope with this case? Do they stick to a single carrier thread to avoid the overhead associated with synchronization and context switching? Or maybe they dispatch tasks over random OS threads?
+
+Direct motivation for writing this benchmark was a discovery that the API for virtual threads doesn't allow to perform an explicit switch to another virtual thread. I suppose this is technically possible, just not supported by the official API. While this is understandable as virtual threads aren't coroutines, they aren't scheduled cooperatively, and we generally don't control the dispatch directly, still such functionality could be important for performance reasons.
+
+Benchmark is meant to verify if there is a difference in the performance or JVM somehow recognizes this pattern and applies optimizations to avoid the overhead of synchronization and jumping between OS threads. Also, it could be used to measure the cost of the "lightweight" context switch between multiple coroutines/virtual threads running on top of a single OS thread.
+
+== Use cases
+
+Generators mentioned above are a classic example where we would like to alternate the execution between the producer and the consumer by repeatedly "jumping" between them.
+
+However, many other concurrent algorithms could benefit from it. Say we fork a task (`1`) into 2 subtasks (`2`, `3`), then we join them and perform `4`. We could simply distribute these tasks to available threads, but this means that between `1` and `4` we have to unpark OS threads 3 times (for `2`, `3` and `4`) and park them 3 times (`1`, `2`, `3`). That's quite a lot of synchronization and jumping between threads.
+
+Instead, we could start executing `2` or `3` directly by the carrier thread executing `1`. Then, whichever of `2` or `3` finishes the last, its carrier thread could execute the `4` straight away. This way we end up with either: OS-thread1: `1`, `3`, `4`, OS-thread2: `2`, or: OS-thread1: `1`, `3`, OS-thread2: `2`, `4`. In both cases, between executing `1` and `4` we have to only park and unpark a single thread and the rest of tasks is executed without going through the full dispatch process. However, this optimization requires that we can "jump" directly from `1` to `3` and from `2`/`3` to `4` staying in the same OS thread.
+
+== Conclusions
+
+NOTE: This section may be opinionated.
+
+I personally don't see any technical reasons why virtual threads couldn't work with the performance on par with coroutines. The only reason they are much slower in this case is the fact VTs don't try to stay in the same carrier thread and start executing another VT straight away. Furthermore, as coroutines are implemented as a kind of hack over the JVM which adds an overhead on its own, I would generally expect virtual threads to outperform coroutines and do closer to the performance of iterators.
+
+The worst case here is the `LockConditionBench`. It already uses the API for atomically suspending the current virtual thread and releasing the lock where another virtual thread is waiting. By providing optimizations to VTs internals and without touching the benchmark itself, I think we could get a performance boost of up to ~4000 times. And half the CPU consumption at the same time.
+
+Other benchmarks would require a change in the Thread API, however, I think it doesn't necessarily have to be specific to virtual threads. Similarly to `Condition.await` which atomically suspends the current thread and releases the lock, we would need something like `LockSupport.parkAndUnpark` which atomically parks the current thread and unparks another one. Virtual threads could benefit from it in some cases, platform threads would not.
+
+== Benchmarking difficulties and anomalies
+
+This case is not trivial to benchmark correctly. We require the producer and the consumer to run in their own contexts. Depending on the case that could mean spawning another thread or a coroutine, acquiring a lock, etc. Usually, JMH is in control of executing subsequent iterations, but in this case we launch two concurrent components that pass messages between them, so we can't easily perform a single iteration as a method call.
+
+Instead, we spawn both sides and run multiple iterations between them. This is generally discouraged by the JMH framework. We use several techniques to decrease the risk that results are incorrect:
+
+=== Requirements
+
+==== Provide large enough number of iterations
+
+We require the number of iterations to be high enough, so a single invocation of the method takes at least 100ms. This is to ensure we measure the iteration time and not an overhead of initialization, etc.
+
+Initially, we still separated the initialization, measuring (iterating) and teardown by using busy-waiting to notify when the measuring should start and end. It turned out, while keeping the invocation time of >100ms, the initial cost of spawning a thread, joining it, etc. is negligible for calculating the per-iteration time.
+
+We can easily verify the invocation time by uncommenting relevant lines in link:build.gradle.kts[] (`operationsPerInvocation`)
+
+==== Confirm the time is proportional to number of iterations
+
+Additionally, we confirm the invocation time changes proportionally to the number of iterations. Again, we can alter the link:build.gradle.kts[] (`multiplier`).
+
+==== Provide multiple implementations, compare results
+
+As this is a nano-benchmark and iterations are very quick, we calculate the sum of fibonacci numbers and consume the sum. This is explicitly discouraged by the JMH framework. For this reason for most benchmarks we provide both implementations: summing and consuming each item. Also, we use summing to verify the answer is correct.
+
+In some cases we provided multiple implementations with classic loops and other looping techniques.
+
+=== Anomalies
+
+Most results look plausible and are consistent across multiple runs of the benchmark and across multiple implementations that are expected to provide similar results (e.g.: `ContinuationsBench` vs `SequenceBench` or `LockConditionBench` vs `ManualUnparkBench`). For most benchmarks the time is proportional to the number of iterations.
+
+Often, there are minor differences between `sum` and `each` benchmarks. Surprisingly, sometimes the first is faster, sometimes the latter. As we are mostly interested in differences in orders of magnitude, we don't look deeper into this, and we interpret small differences as a confirmation that the benchmark generally works correctly.
+
+In some cases for virtual threads, we observed that the time per-iteration decreased with more iterations. It turned out this is only because while using the multiplier of 0.01 it already went down to ~1ms per invocation and the overhead started to matter in this range. After increasing the number of iterations we got reliable results, and they were the same as for multiplier 1 before the change.
+
+Interestingly, `SpinVolatileBench` is consistently faster while using platform threads. It is expected virtual threads don't provide benefits over platform threads for spinning. Decreased performance may be caused by some kind of overhead associated with virtual threads.
